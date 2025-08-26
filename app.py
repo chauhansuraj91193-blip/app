@@ -283,8 +283,10 @@ with st.expander("📜 Risk Posture Narrative (Optional)"):
     )
 
     risky_mcc_breakdown = (
-        df_scored[df_scored["merchant_category"].str.lower().isin(RISKY_MERCHANT_CATS)]
-        ["merchant_category"].str.lower().value_counts().head(5)
+    df_scored.assign(mc_str=df_scored["merchant_category"].astype(str).str.lower())
+    .loc[lambda x: x["mc_str"].isin(RISKY_MERCHANT_CATS), "mc_str"]
+    .value_counts()
+    .head(5)
     )
 
     heuristics_text = (
