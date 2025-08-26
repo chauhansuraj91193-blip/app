@@ -1,14 +1,3 @@
-# app.py
-# Streamlit Transaction Risk Scoring App
-# -------------------------------------
-# Features
-# 1) Upload CSV of transactions
-# 2) Compute risk score (0-100) using business rules
-# 3) Categorize into Low / Medium / High
-# 4) Show table of top 20 high-risk transactions
-# 5) Show distribution chart
-# 6) (Optional) AI narrative summary if OPENAI_API_KEY is set
-
 import io
 import os
 import base64
@@ -16,6 +5,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 
 # -------------------------
 # UI CONFIG
@@ -24,135 +14,44 @@ st.set_page_config(
     page_title="Transaction Risk Scoring",
     page_icon="🕵️",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("🕵️ Transaction Risk Scoring App")
-st.caption("Upload a CSV → score risk → see top risks & distribution. Optional AI summary at the end.")
+st.markdown("""
+    <style>
+        .metric-box {
+            padding: 15px;
+            border-radius: 12px;
+            background: #f9f9f9;
+            box-shadow: 0px 2px 6px rgba(0,0,0,0.05);
+            text-align: center;
+        }
+        .risk-high {color: #e63946; font-weight: bold;}
+        .risk-medium {color: #f4a261; font-weight: bold;}
+        .risk-low {color: #2a9d8f; font-weight: bold;}
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("🕵️ Transaction Risk Scoring Dashboard")
+st.caption("Upload transactions → score risk → analyze top risks & portfolio distribution.")
 
 # -------------------------
-# Helper: Download link for DataFrame
+# Helper Functions
 # -------------------------
 def make_download_link(df: pd.DataFrame, filename: str) -> str:
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     b64 = base64.b64encode(csv_bytes).decode()
-    return f'<a href="data:file/csv;base64,{b64}" download="{filename}">Download CSV</a>'
+    return f'<a href="data:file/csv;base64,{b64}" download="{filename}" style="color: #0068c9; font-weight: bold;">⬇️ Download Scored CSV</a>'
+
+# Risk Configurations
+HIGH_RISK_COUNTRIES = {"IR", "KP", "SY", "CU", "RU", "UA", "AF", "IQ", "YE", "SO", "SD", "CD"}
+RISKY_MERCHANT_CATS = {"gambling", "crypto", "virtual_goods", "adult", "gift_cards"}
+KYC_TIER_SCORES = {"tier_1": 10, "basic": 10, "lite": 10, "tier_2": 5, "standard": 5, "tier_3": 0, "enhanced": 0, "full": 0}
+CATEGORY_RULES = {"Low": (0, 39), "Medium": (40, 69), "High": (70, 100)}
 
 # -------------------------
-# Business Rules Configuration (edit as needed)
+# Risk Scoring Engine
 # -------------------------
-HIGH_RISK_COUNTRIES = {
-    # Example list; adjust for your org
-    "IR", "KP", "SY", "CU", "RU", "UA", "AF", "IQ", "YE", "SO", "SD", "CD"
-}
-
-RISKY_MERCHANT_CATS = {
-    # Strings should match values in `merchant_category`
-    "gambling", "crypto", "virtual_goods", "adult", "gift_cards"
-}
-
-KYC_TIER_SCORES = {
-    # Map your dataset's kyc_tier values here (case-insensitive)
-    # Unknown tiers will default to 5
-    "tier_1": 10,
-    "basic": 10,
-    "lite": 10,
-    "tier_2": 5,
-    "standard": 5,
-    "tier_3": 0,
-    "enhanced": 0,
-    "full": 0,
-}
-
-CATEGORY_RULES = {
-    "Low": (0, 39),
-    "Medium": (40, 69),
-    "High": (70, 100),
-}
-
-# -------------------------
-# Core Risk Scoring Function
-# -------------------------
-
-def score_transaction(row: pd.Series) -> int:
-    # Start score at 10
-    score = 10
-
-    # 0) Sanctions hard stop
-    sanctioned = str(row.get("sanctioned_party_flag", 0)).strip()
-    if sanctioned in {"1", "true", "True", "TRUE"} or sanctioned == 1:
-        return 100
-
-    # 1) Amount (USD)
-    amt = to_float(row.get("amount_usd"))
-    if amt is not None:
-        if amt > 10000:
-            score += 20
-        elif amt > 5000:
-            score += 15
-        elif amt > 1000:
-            score += 10
-        else:
-            score += 0
-
-    # 2) Country corridor risk
-    sc = str(row.get("sender_country", "")).upper()
-    rc = str(row.get("receiver_country", "")).upper()
-    if sc and rc and sc != rc:
-        score += 5  # cross-border bump
-    if sc in HIGH_RISK_COUNTRIES or rc in HIGH_RISK_COUNTRIES:
-        score += 15
-
-    # 3) KYC Tier
-    tier_raw = str(row.get("kyc_tier", "")).lower().strip()
-    score += KYC_TIER_SCORES.get(tier_raw, 5)
-
-    # 4) Velocity
-    v1h = to_float(row.get("velocity_1h"))
-    v24h = to_float(row.get("velocity_24h"))
-    if v1h is not None:
-        if v1h > 5:
-            score += 15
-        elif v1h > 2:
-            score += 8
-    if v24h is not None:
-        if v24h > 20:
-            score += 10
-        elif v24h > 10:
-            score += 5
-
-    # 5) Merchant category
-    mcc = str(row.get("merchant_category", "")).lower().strip()
-    if mcc in RISKY_MERCHANT_CATS:
-        score += 10
-
-    # 6) Device change
-    dchg = str(row.get("device_change_flag", 0)).strip()
-    if dchg in {"1", "true", "True", "TRUE"} or dchg == 1:
-        score += 10
-
-    # 7) Account age (days)
-    age = to_float(row.get("customer_age_days"))
-    if age is not None:
-        if age < 30:
-            score += 15
-        elif age < 90:
-            score += 10
-        elif age < 365:
-            score += 5
-
-    # 8) Prior txn in 24h (bursting)
-    prior_24h = to_float(row.get("prior_txn_24h"))
-    if prior_24h is not None:
-        if prior_24h > 10:
-            score += 10
-        elif prior_24h > 3:
-            score += 5
-
-    # Cap at [0, 100]
-    score = max(0, min(100, int(round(score))))
-    return score
-
-
 def to_float(x):
     try:
         if x is None or (isinstance(x, str) and x.strip() == ""):
@@ -161,6 +60,36 @@ def to_float(x):
     except Exception:
         return None
 
+def score_transaction(row: pd.Series) -> int:
+    score = 10
+    sanctioned = str(row.get("sanctioned_party_flag", 0)).strip()
+    if sanctioned in {"1", "true", "True", "TRUE"} or sanctioned == 1:
+        return 100
+    amt = to_float(row.get("amount_usd"))
+    if amt:
+        score += 20 if amt > 10000 else 15 if amt > 5000 else 10 if amt > 1000 else 0
+    sc, rc = str(row.get("sender_country", "")).upper(), str(row.get("receiver_country", "")).upper()
+    if sc and rc and sc != rc:
+        score += 5
+    if sc in HIGH_RISK_COUNTRIES or rc in HIGH_RISK_COUNTRIES:
+        score += 15
+    score += KYC_TIER_SCORES.get(str(row.get("kyc_tier", "")).lower().strip(), 5)
+    v1h, v24h = to_float(row.get("velocity_1h")), to_float(row.get("velocity_24h"))
+    if v1h:
+        score += 15 if v1h > 5 else 8 if v1h > 2 else 0
+    if v24h:
+        score += 10 if v24h > 20 else 5 if v24h > 10 else 0
+    if str(row.get("merchant_category", "")).lower().strip() in RISKY_MERCHANT_CATS:
+        score += 10
+    if str(row.get("device_change_flag", 0)).strip() in {"1", "true", "True", "TRUE"}:
+        score += 10
+    age = to_float(row.get("customer_age_days"))
+    if age:
+        score += 15 if age < 30 else 10 if age < 90 else 5 if age < 365 else 0
+    prior = to_float(row.get("prior_txn_24h"))
+    if prior:
+        score += 10 if prior > 10 else 5 if prior > 3 else 0
+    return max(0, min(100, int(round(score))))
 
 def categorize(score: int) -> str:
     for name, (lo, hi) in CATEGORY_RULES.items():
@@ -169,40 +98,30 @@ def categorize(score: int) -> str:
     return "Low"
 
 # -------------------------
-# Sidebar Controls
+# Sidebar
 # -------------------------
 with st.sidebar:
-    st.header("Settings")
-    st.write("Tune business rules in the code (top of file) if needed.")
-    st.markdown("**Risk Category Thresholds**")
+    st.header("⚙️ Settings")
+    st.info("Tune business rules in code if needed.")
     st.json(CATEGORY_RULES)
-
     st.markdown("**High-Risk Countries**")
     st.code(", ".join(sorted(HIGH_RISK_COUNTRIES)))
-
     st.markdown("**Risky Merchant Categories**")
     st.code(", ".join(sorted(RISKY_MERCHANT_CATS)))
 
 # -------------------------
-# File Upload
+# Upload CSV
 # -------------------------
-required_cols = [
-    "txn_id", "timestamp", "sender_country", "receiver_country", "amount_usd",
-    "channel", "customer_age_days", "prior_txn_24h", "sanctioned_party_flag",
-    "kyc_tier", "merchant_category", "velocity_1h", "velocity_24h", "device_change_flag"
-]
+required_cols = ["txn_id","timestamp","sender_country","receiver_country","amount_usd","channel","customer_age_days","prior_txn_24h","sanctioned_party_flag","kyc_tier","merchant_category","velocity_1h","velocity_24h","device_change_flag"]
 
-uploaded = st.file_uploader("Upload sample_transactions.csv", type=["csv"])
+uploaded = st.file_uploader("📂 Upload Transactions CSV", type=["csv"])
 
-if uploaded is None:
-    st.info(
-        "⬆️ Upload your CSV to begin. Expected columns: "
-        + ", ".join(required_cols)
-    )
+if not uploaded:
+    st.info("⬆️ Upload your transactions file to begin.")
     st.stop()
 
 # -------------------------
-# Load & Validate
+# Process Data
 # -------------------------
 df = pd.read_csv(uploaded)
 missing = [c for c in required_cols if c not in df.columns]
@@ -210,9 +129,6 @@ if missing:
     st.error(f"Missing required columns: {missing}")
     st.stop()
 
-# -------------------------
-# Compute Risk
-# -------------------------
 df_scored = df.copy()
 df_scored["risk_score"] = df_scored.apply(score_transaction, axis=1)
 df_scored["risk_category"] = df_scored["risk_score"].apply(categorize)
@@ -220,102 +136,59 @@ df_scored["risk_category"] = df_scored["risk_score"].apply(categorize)
 # -------------------------
 # KPIs
 # -------------------------
+high = int((df_scored["risk_category"] == "High").sum())
+med = int((df_scored["risk_category"] == "Medium").sum())
+low = int((df_scored["risk_category"] == "Low").sum())
+total = len(df_scored)
+pct_high = round(100 * high / total, 1)
+
 col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("Total Transactions", len(df_scored))
-with col2:
-    st.metric("High Risk", int((df_scored["risk_category"] == "High").sum()))
-with col3:
-    st.metric("Medium Risk", int((df_scored["risk_category"] == "Medium").sum()))
-with col4:
-    st.metric("Avg Risk Score", round(float(df_scored["risk_score"].mean()), 1))
+col1.metric("Total Transactions", total)
+col2.metric("High Risk", high, f"{pct_high}%", delta_color="inverse")
+col3.metric("Medium Risk", med)
+col4.metric("Average Score", round(float(df_scored["risk_score"].mean()), 1))
 
 st.divider()
 
 # -------------------------
-# Top 20 High-Risk Table
+# Top High-Risk Transactions
 # -------------------------
-st.subheader("Top 20 High-Risk Transactions")
-cols_show = [
-    "txn_id", "timestamp", "sender_country", "receiver_country", "amount_usd",
-    "channel", "merchant_category", "kyc_tier", "velocity_1h", "velocity_24h",
-    "prior_txn_24h", "device_change_flag", "sanctioned_party_flag", "risk_score", "risk_category"
-]
-
-top_high = (
-    df_scored.sort_values(["risk_category", "risk_score"], ascending=[True, False])
-    .query('risk_category == "High"')
-    .head(20)
-)
-
-st.dataframe(top_high[cols_show], use_container_width=True, hide_index=True)
+st.subheader("🚨 Top 20 High-Risk Transactions")
+top_high = df_scored[df_scored["risk_category"]=="High"].nlargest(20, "risk_score")
+st.dataframe(top_high, use_container_width=True, hide_index=True)
 
 # -------------------------
-# Distribution Chart
+# Charts
 # -------------------------
-st.subheader("Risk Category Distribution")
-counts = df_scored["risk_category"].value_counts().rename_axis("risk_category").reset_index(name="count")
-fig = px.pie(counts, names="risk_category", values="count", hole=0.3)
-st.plotly_chart(fig, use_container_width=True)
+left, right = st.columns(2)
+
+with left:
+    st.subheader("📊 Risk Category Distribution")
+    counts = df_scored["risk_category"].value_counts().reset_index()
+    fig = px.pie(counts, names="index", values="risk_category", hole=0.3,
+                 color_discrete_sequence=["#2a9d8f", "#f4a261", "#e63946"])
+    fig.update_traces(textinfo="percent+label")
+    st.plotly_chart(fig, use_container_width=True)
+
+with right:
+    st.subheader("🌍 Top Risky Corridors")
+    df_scored["corridor"] = df_scored["sender_country"].str.upper() + ">" + df_scored["receiver_country"].str.upper()
+    corr = df_scored.groupby("corridor").size().reset_index(name="count").sort_values("count", ascending=False).head(10)
+    fig2 = px.bar(corr, x="corridor", y="count", text="count", color="count",
+                  color_continuous_scale="Reds")
+    st.plotly_chart(fig2, use_container_width=True)
 
 # -------------------------
-# Download Scored CSV
+# Download Button
 # -------------------------
-st.subheader("Download Results")
+st.subheader("⬇️ Export Results")
 st.markdown(make_download_link(df_scored, "transactions_scored.csv"), unsafe_allow_html=True)
 
 # -------------------------
-# Optional: AI Narrative Summary (local heuristic or OpenAI if key provided)
+# Narrative Summary
 # -------------------------
-with st.expander("📜 Risk Posture Narrative (Optional)"):
-    use_openai = st.toggle("Use OpenAI (requires OPENAI_API_KEY env var)", value=False)
+st.subheader("📜 Portfolio Risk Narrative")
+heuristics_text = f"Out of {total} transactions, {high} are High risk ({pct_high}%), {med} Medium, and {low} Low risk. The average score is {round(float(df_scored['risk_score'].mean()),1)}."
+st.success(heuristics_text)
 
-    # Build a structured summary first
-    total = len(df_scored)
-    high = int((df_scored["risk_category"] == "High").sum())
-    med = int((df_scored["risk_category"] == "Medium").sum())
-    low = int((df_scored["risk_category"] == "Low").sum())
-    pct_high = round(100 * high / total, 1) if total else 0.0
-
-    top_corridors = (
-        df_scored.assign(corridor=lambda x: x["sender_country"].astype(str).str.upper() + ">" + x["receiver_country"].astype(str).str.upper())
-        .groupby("corridor").size().sort_values(ascending=False).head(3)
-    )
-
-    risky_mcc_breakdown = (
-    df_scored.assign(mc_str=df_scored["merchant_category"].astype(str).str.lower())
-    .loc[lambda x: x["mc_str"].isin(RISKY_MERCHANT_CATS), "mc_str"]
-    .value_counts()
-    .head(5)
-    )
-
-    heuristics_text = (
-        f"Out of {total} transactions, {high} ({pct_high}%) are High risk, {med} are Medium, and {low} are Low. "
-        f"Top corridors by volume: {', '.join([f'{k} ({v})' for k, v in top_corridors.items()]) or 'n/a'}. "
-        f"Risky merchant categories observed: {', '.join([f'{k} ({v})' for k, v in risky_mcc_breakdown.items()]) or 'none'}."
-    )
-
-    if use_openai and os.getenv("OPENAI_API_KEY"):
-        try:
-            from openai import OpenAI
-            client = OpenAI()
-            prompt = (
-                "You are a fraud risk analyst. Write a crisp 4-6 sentence summary of the portfolio risk based on these facts.\n" 
-                + heuristics_text
-            )
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-            )
-            ai_text = resp.choices[0].message.content
-            st.write(ai_text)
-        except Exception as e:
-            st.warning(f"OpenAI generation failed; falling back to heuristic summary. Error: {e}")
-            st.write(heuristics_text)
-    else:
-        st.write(heuristics_text)
-
-st.divider()
-
-st.caption("Built with Streamlit • Edit rules at the top to fit your policy. © 2025")
+st.caption("NIUM © 2025")
