@@ -164,10 +164,18 @@ left, right = st.columns(2)
 
 with left:
     st.subheader("📊 Risk Category Distribution")
-    counts = df_scored["risk_category"].value_counts().reset_index()
-    fig = px.pie(counts, names="index", values="risk_category", hole=0.3,
-                 color_discrete_sequence=["#2a9d8f", "#f4a261", "#e63946"])
-    fig.update_traces(textinfo="percent+label")
+    # --- Risk distribution counts ---
+    counts = df["risk_category"].value_counts().reset_index()
+    counts.columns = ["risk_category", "count"]
+
+    # --- Pie chart ---
+    fig = px.pie(
+        counts,
+        names="risk_category",
+        values="count",
+        hole=0.3,
+        color_discrete_sequence=["#2a9d8f", "#f4a261", "#e63946"]
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 with right:
@@ -192,3 +200,4 @@ heuristics_text = f"Out of {total} transactions, {high} are High risk ({pct_high
 st.success(heuristics_text)
 
 st.caption("NIUM © 2025")
+
